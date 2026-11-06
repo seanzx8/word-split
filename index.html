@@ -50,8 +50,9 @@ footer .count{color:var(--text);font-variant-numeric:tabular-nums}
 .ipa{font-family:var(--ipa);font-size:clamp(18px,2.4vw,24px);color:#c9c9dc;letter-spacing:.02em}
 /* 跟写 / 听写 */
 .slot{display:inline-flex;flex-direction:column;align-items:stretch}
-.slot .chars{display:flex;white-space:nowrap}
-.ch{display:inline-block;width:.62em;text-align:center;position:relative}
+.slot .chars{display:flex;white-space:nowrap;font-family:ui-monospace,"Cascadia Mono","Cascadia Code",Consolas,"SF Mono",Menlo,"Roboto Mono","Droid Sans Mono",monospace;letter-spacing:.02em}
+/* 等宽字体：每个字母宽度一样，w、m 不会挤到旁边，听写时也看不出是宽字母还是窄字母 */
+.ch{display:inline-block;text-align:center;position:relative}
 .ch.hidden{color:transparent}
 .ch.ghost{color:var(--c);opacity:.25}
 .ch.done{color:var(--c)}
@@ -121,7 +122,7 @@ html.kbopen .tabs{width:100%;justify-content:center}
 html.kbopen main{justify-content:flex-start;padding:8px 12px;gap:7px;overflow-y:auto}
 html.kbopen footer,html.kbopen .tapkb,html.kbopen .sents{display:none}
 html.kbopen .cn{font-size:22px;order:-1}  /* 键盘开着时中文放最上面，永远不会被挡 */
-html.kbopen #wrow{font-size:min(12vw,54px,calc(var(--vvh,100vh) * .15))!important}
+html.kbopen #wrow{font-size:min(9vw,36px,calc(var(--vvh,100vh) * .12))!important}
 html.kbopen .status{min-height:0;font-size:15px}
 html.kbopen .ctrls{gap:8px}
 html.kbopen .ctrls .pill{padding:5px 11px;font-size:13px}
@@ -560,10 +561,12 @@ function beep(freq, dur, type = 'sine', vol = 0.06, delay = 0) {
 }
 
 /* ================= 渲染 ================= */
-function fontFor(text) {
+function fontFor(text, typing) {
   const len = text.length;
   const px = Math.max(34, Math.min(130, 1100 / (len + 2)));
-  const vw = Math.max(7, Math.min(15, 180 / (len + 2)));
+  // 手机上跟写、听写字号小一些（上限约 40px），给中文、按钮和键盘留空间
+  const cap = typing && innerWidth <= 640 ? 10 : 15;
+  const vw = Math.max(6, Math.min(cap, 180 / (len + 2)));
   return `font-size:min(${px}px,${vw}vw)`;
 }
 function sylGroups() {
@@ -710,7 +713,7 @@ function renderTyping(shake) {
   else if (W.hint >= 0) status = '<div class="status">提示：照着淡色字母拼</div>';
   const showIpa = S.mode === 'follow' || W.done; // 听写时音标会提示拼写，拼完再显示
   main.innerHTML = `
-    <div class="wordrow ${W.done && W.ok ? 'win' : ''}" id="wrow" style="${fontFor(W.text)}">${row}</div>
+    <div class="wordrow ${W.done && W.ok ? 'win' : ''}" id="wrow" style="${fontFor(W.text, true)}">${row}</div>
     ${showIpa ? `<div class="ipa">${esc(W.ipa)}</div>` : ''}
     <div class="cn">${esc(W.item.cn)}</div>
     ${status}
@@ -794,6 +797,14 @@ function startReview() {
   closeModal();
   if (S.mode === 'learn') S.mode = 'dictation';
   S.unit = 'due';
+  buildQueue(false);
+  enterWord();
+}
+// 练错词：错词本里的词，用听写练；一次拼对就从错词本移出
+function startWrong() {
+  closeModal();
+  if (S.mode === 'learn') S.mode = 'dictation';
+  S.unit = 'wrong';
   buildQueue(false);
   enterWord();
 }
@@ -1010,10 +1021,12 @@ function showStats() {
     <p class="sub" style="text-align:left">「掌握」= 隔了 7 天以上，听写还能一次拼对。词的总数里，重复出现的词只算一次。</p>
     <div class="sumbtns">
       <button class="pill pri" id="bsReview" ${st.due ? '' : 'disabled'}>开始复习（${st.due}）</button>
+      <button class="pill" id="bsWrong" ${Object.keys(S.wrong).length ? '' : 'disabled'}>练错词（${Object.keys(S.wrong).length}）</button>
       <button class="pill" id="bsNew">学新词</button>
     </div>`);
   $('#bsReview').onclick = startReview;
   $('#bsNew').onclick = startNew;
+  $('#bsWrong').onclick = startWrong;
 }
 function showSettings() {
   const chk = (k, label) => `<div class="row"><label><input type="checkbox" data-k="${k}" ${S[k] ? 'checked' : ''}>${label}</label></div>`;
