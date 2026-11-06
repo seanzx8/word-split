@@ -1111,13 +1111,15 @@ document.addEventListener('keydown', e => {
 // 输入法组字（候选词）期间不能清空输入框，否则会打断输入法；改成记住处理到第几个字符，只处理新增的部分
 let kbPrev = '';
 function readKb() {
-  const v = kb.value;
+  // 只看字母：中文输入法组字时会往里插分词符（a'bout、ab ou t），或者最后上屏成汉字，
+  // 不去掉的话插入点后面的字母会被当成新输入再算一遍，明明没拼错也判错
+  const v = kb.value.replace(/[^a-zA-Z]/g, '');
   // 和上次的内容比，只处理公共前缀之后的新字符：既能处理逐个追加，也能处理"删掉最后一个再换一个"
   let same = 0;
   while (same < v.length && same < kbPrev.length && v[same] === kbPrev[same]) same++;
   const fresh = v.slice(same);
   kbPrev = v;
-  for (const ch of fresh) if (/[a-zA-Z]/.test(ch)) onLetter(ch);
+  for (const ch of fresh) onLetter(ch);
 }
 function resetKb() { kb.value = ''; kbPrev = ''; }
 kb.addEventListener('input', readKb);
