@@ -545,10 +545,16 @@ function makeTiles(req) {
 }
 
 /* ================= 声音 ================= */
-let curAudio = null;
+// 全程只用一个 <audio>，每次换地址播放，不再每个词新建一个（微信内置浏览器里频繁新建、停止音频和朗读容易崩）
+let AU = null, playTok = 0;
+// 只在真的在读（或排着队）时才停浏览器朗读，不然每个词要白调好几次 cancel
+function cancelTts() {
+  try { if (speechSynthesis.speaking || speechSynthesis.pending) speechSynthesis.cancel(); } catch (e) {}
+}
 function stopAudio() {
-  if (curAudio) { curAudio.onerror = null; curAudio.pause(); curAudio = null; }
-  try { speechSynthesis.cancel(); } catch (e) {}
+  playTok++;                                         // 让上一次播放的回调全部作废
+  if (AU) { AU.onplaying = AU.onended = AU.onerror = null; if (!AU.paused) AU.pause(); }
+  cancelTts();
 }
 // 全大写的缩写（TV、PE、US）按字母读
 function audioText(text) {
@@ -575,7 +581,7 @@ function ttsP(text, rate = 0.85) {
     u.rate = rate;
     u.onend = fin;
     u.onerror = fin;
-    speechSynthesis.cancel();
+    cancelTts();
     speechSynthesis.speak(u);
     setTimeout(fin, 900 + text.length * 260);
   });
@@ -589,12 +595,13 @@ function playText(raw) {
     const fin = () => { if (!done) { done = true; res(); } };
     const fallback = () => { if (fbUsed || done) return; fbUsed = true; ttsP(text).then(fin); };
     if (!navigator.onLine) { fallback(); return; }
-    const a = new Audio('https://dict.youdao.com/dictvoice?audio=' + encodeURIComponent(text) + '&type=' + (S.accent === 'uk' ? 1 : 2));
-    curAudio = a;
+    const tok = playTok, a = AU || (AU = new Audio());
     a.onplaying = () => { started = true; };
     a.onended = fin;
     a.onerror = () => { started ? fin() : fallback(); };
-    a.play().catch(() => { if (!started) fallback(); });
+    a.src = 'https://dict.youdao.com/dictvoice?audio=' + encodeURIComponent(text) + '&type=' + (S.accent === 'uk' ? 1 : 2);
+    // 换地址会让上一次的 play() 报「被新的加载打断」，那是旧的这次，不能当成失败去朗读旧的词
+    a.play().catch(() => { if (tok === playTok && !started) fallback(); });
     setTimeout(fin, Math.max(4000, text.length * 120));
   });
 }
