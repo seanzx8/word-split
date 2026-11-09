@@ -327,9 +327,16 @@ function unitBadge(u) {
   return n === 0 ? `${u.words.length}` : n === u.words.length ? `✓ ${n}` : `${n}/${u.words.length}`;
 }
 function sessionStars() {
-  if (!results.length) return 0;
-  const rate = results.filter(r => r.ok).length / results.length;
+  const ok = results.filter(r => r.ok).length;
+  if (!ok) return 0;
+  const rate = ok / results.length;
   return rate >= 0.9 ? 3 : rate >= 0.7 ? 2 : 1;
+}
+// 记一个词在本组的结果；同一个词（退回去重拼）只留最后一次
+function setResult(item, ok, skip) {
+  const key = keyOf(item);
+  results = results.filter(r => keyOf(r.item) !== key);
+  results.push({item, ok, skip: !!skip});
 }
 
 /* ================= 庆祝效果：彩带、夸奖弹字、夸奖语音 ================= */
@@ -427,6 +434,7 @@ function celebrateWord() {
 function sessionFx() {
   if (S.mode === 'learn' || !results.length) { sfxSyl(); return; }
   const stars = sessionStars();
+  if (!stars) { sfxSyl(); return; }
   if (stars >= 2) sfxFanfare(); else sfxSyl();
   rain(stars === 3 ? 170 : stars === 2 ? 80 : 0);
   setTimeout(() => sayPraise(stars === 3 ? 'Excellent!' : stars === 2 ? 'Good job!' : 'Keep going!'), 500);
@@ -744,16 +752,21 @@ function renderSummary() {
       </div></div>`;
   } else {
     const ok = results.filter(r => r.ok).length;
-    const bad = results.filter(r => !r.ok);
+    const bad = results.filter(r => !r.ok);                 // 拼错的 + 跳过的，都要再练
+    const wrongN = bad.filter(r => !r.skip).length, skipN = bad.length - wrongN;
+    const title = !bad.length ? '全部一次拼对 🎉' : !ok && !wrongN ? '这一组都跳过了' : '练完一组 💪';
+    const detail = `${MODES[S.mode]} ${results.length} 个，一次拼对 ${ok} 个`
+      + (wrongN ? `，拼错 ${wrongN} 个` : '') + (skipN ? `，跳过 ${skipN} 个` : '')
+      + (bad.length ? `，下面 ${bad.length} 个要再练练` : '');
     const hasNext = typeof S.unit === 'number' && S.unit < BOOKS[S.book].units.length - 1;
     const stars = sessionStars(), st = stats();
     const dueMore = st.due;
     main.innerHTML = `<div class="sum">
       <div class="stars">${[0, 1, 2].map(i => `<span class="${i < stars ? 'on' : ''}" style="--d:${i * 180}ms">⭐</span>`).join('')}</div>
-      <h2>${bad.length ? '练完一组 💪' : '全部一次拼对 🎉'}</h2>
-      <p>${MODES[S.mode]} ${results.length} 个，一次拼对 ${ok} 个${bad.length ? `，下面 ${bad.length} 个要再练练` : ''}</p>
+      <h2>${title}</h2>
+      <p>${detail}</p>
       <p class="sub">今天已练 ${st.today.w} 个词 · 🔥 连续打卡 ${st.streak} 天</p>
-      ${bad.length ? '<div class="chips">' + bad.map(r => `<span class="chip">${esc(plain(r.item.l))}<small>${esc(r.item.cn)}</small></span>`).join('') + '</div>' : ''}
+      ${bad.length ? '<div class="chips">' + bad.map(r => `<span class="chip">${esc(plain(r.item.l))}<small>${r.skip ? '（跳过）' : ''}${esc(r.item.cn)}</small></span>`).join('') + '</div>' : ''}
       <div class="sumbtns">
         ${bad.length ? '<button class="pill pri" data-a="redo">只练这几个</button>' : ''}
         ${dueMore ? `<button class="pill ${bad.length ? '' : 'pri'}" data-a="review">${S.unit === 'due' ? '继续复习' : '去复习'}（${dueMore}）</button>` : ''}
@@ -789,7 +802,9 @@ function enterWord() {
   focusKb();
 }
 function next() {
-  if (!queue.length) return;
+  if (!queue.length || finished) return;
+  // 跟写、听写没拼完就跳过：记成「跳过」，结算时单独列出来（不进错词本、不影响复习进度）
+  if (S.mode !== 'learn' && W && !W.done && !results.some(r => keyOf(r.item) === keyOf(W.item))) setResult(W.item, false, true);
   if (S.idx < queue.length - 1) { S.idx++; enterWord(); }
   else { finished = true; W = null; stopAudio(); save(); render(); sessionFx(); }
 }
@@ -868,7 +883,7 @@ function complete() {
   W.done = true;
   W.ok = !W.hadError;
   W.wrongFlash = null;
-  results.push({item: W.item, ok: W.ok});
+  setResult(W.item, W.ok);
   const key = keyOf(W.item);
   if (!W.ok) {
     const e = S.wrong[key] || {item: W.item, count: 0};
