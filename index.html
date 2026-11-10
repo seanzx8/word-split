@@ -36,7 +36,7 @@ footer .count{color:var(--text);font-variant-numeric:tabular-nums}
 .wgroup{display:inline-flex;align-items:flex-end;white-space:nowrap}
 /* 认读模式：音节 > 字母组合（下面标音标） */
 .syl,.sep{display:inline-flex;flex-direction:column;align-items:stretch}
-.syl{cursor:pointer;transition:transform .15s}
+.syl{transition:transform .15s}
 .chunks{display:flex;justify-content:center;gap:.07em}
 .ck{display:flex;flex-direction:column;align-items:center;min-width:.3em}
 .ck .cl{color:var(--c);transition:text-shadow .15s}
@@ -47,7 +47,8 @@ footer .count{color:var(--text);font-variant-numeric:tabular-nums}
 .sl{height:2px;background:var(--sl);margin-top:.12em;position:relative}
 .syl .sl::before{content:"";position:absolute;left:0;bottom:0;width:2px;height:10px;background:var(--sl)}
 .wgroup .syl:last-child .sl::after{content:"";position:absolute;right:0;bottom:0;width:2px;height:10px;background:var(--sl)}
-.syl:hover{transform:translateY(-3px)}
+.syl.tap{cursor:pointer}
+.syl.tap:hover{transform:translateY(-3px)}
 .syl.speak{transform:scale(1.08)}
 .syl.speak .cl{text-shadow:0 0 22px var(--c)}
 .wordrow.speakall .cl{text-shadow:0 0 18px var(--c)}
@@ -245,19 +246,26 @@ const THEMES = {auto: '跟随系统', dark: '深色', light: '浅色', warm: '�
 const darkMQ = matchMedia('(prefers-color-scheme: dark)');
 let COLORS = PALETTES.rainbow.dark;
 const MODES = {learn: '拆分认读', follow: '跟写', dictation: '听写'};
+// 单个音节的发音：浏览器朗读把单字母音节读成字母名（very 的 y 读成 /waɪ/）、弱读音节按拼写猜，读不准。
+// 和小程序一样先关掉逐节读、点音节读、拼完一节读一节；有了可靠的音节音频再改成 true
+const SYL_AUDIO = false;
 const BOOKS = {};
 BOOK_DATA.forEach(b => { BOOKS[b.id] = b; });
 
 /* ================= 状态 ================= */
 const KEY = 'chaici-pep4-v1';
 const DEFAULTS = {book: 'pep4a', unit: 0, mode: 'learn', idx: 0, accent: 'uk', theme: 'dark', palette: 'rainbow', tiles: false, autoPlay: true, sylSpeak: true, sound: true, shuffle: false, showSent: true,
-  praise: true, fx: !matchMedia('(prefers-reduced-motion: reduce)').matches, goal: 10, prog: {}, days: {}, wrong: {}, custom: {}};
+  retype: true, skipMastered: false, praise: true, fx: !matchMedia('(prefers-reduced-motion: reduce)').matches, goal: 10, prog: {}, days: {}, wrong: {}, custom: {}};
 const S = Object.assign({}, DEFAULTS, safeLoad());
 if (!BOOKS[S.book]) { S.book = BOOKS.pep4a ? 'pep4a' : BOOK_DATA[0].id; S.unit = 0; S.idx = 0; } // 上次选的书已隐藏
 delete S.splits; // 旧版拆分格式，已废弃
-for (const k in S.wrong) if (!S.wrong[k].item) delete S.wrong[k]; // 旧版错词记录没有拆分数据
 function safeLoad() { try { return JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) { return {}; } }
-function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} }
+// 一次操作里常连着调好几次 save（拼完一个词、进下一个词），合并成一次写；关页面、切走时立刻写，保证不丢
+let saveT = 0;
+function flush() { clearTimeout(saveT); saveT = 0; try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} }
+function save() { clearTimeout(saveT); saveT = setTimeout(flush, 300); }
+addEventListener('pagehide', flush);
+document.addEventListener('visibilitychange', () => { if (document.hidden) flush(); });
 
 const $ = s => document.querySelector(s);
 const main = $('#stage');
@@ -284,6 +292,16 @@ let queue = [], results = [], finished = false, W = null;
 /* ================= 学习进度（间隔复习）、统计 ================= */
 const ALLW = {}; // 所有单词按字母去重（brother 三年级上、下册各有一个，进度共用）
 BOOK_DATA.forEach(b => b.units.forEach(u => u.words.forEach(w => { ALLW[keyOf(w)] = ALLW[keyOf(w)] || w; })));
+// 旧存档的错词本存了整条词条：词库里有的只留次数；词库里没有的留着旧词条兜底；两样都没有的删掉
+(() => {
+  let changed = false;
+  for (const k in S.wrong) {
+    const e = S.wrong[k];
+    if (!e || typeof e !== 'object' || (!ALLW[k] && !e.item)) { delete S.wrong[k]; changed = true; }
+    else if (e.item && ALLW[k]) { S.wrong[k] = {count: e.count || 1}; changed = true; }
+  }
+  if (changed) flush();
+})();
 
 // 复习间隔（天）：词在第几档就隔多久再复习。听写拼对升一档，拼错降档并当天重练
 const INTERVALS = [0, 1, 2, 4, 7, 15, 30];
@@ -502,13 +520,19 @@ function fullIpa(syls) {
   return '/' + words.join(' ') + '/';
 }
 
+// 错词本只存 {count}，词条用时去词库查（以前连例句整条存，四级练多了存档越来越大，每次保存都慢）。
+// 词库里已经没有的词（教材改版删掉的），迁移时把旧词条留在 item 里兜底；两样都没有的才删
+const wrongItem = k => ALLW[k] || (S.wrong[k] && S.wrong[k].item) || null;
+const wrongKeys = () => Object.keys(S.wrong).filter(wrongItem);
+const wrongCount = () => wrongKeys().length;
 function unitWords(unit) {
   const book = BOOKS[S.book];
-  if (unit === 'wrong') return Object.values(S.wrong).map(x => x.item);
+  if (unit === 'wrong') return wrongKeys().map(wrongItem);
   if (unit === 'due') return dueList().slice(0, REVIEW_CAP);
-  if (unit === 'all') return book.units.flatMap(u => u.words);
-  return (book.units[unit] || book.units[0]).words;
+  const words = unit === 'all' ? book.units.flatMap(u => u.words) : (book.units[unit] || book.units[0]).words;
+  return S.skipMastered ? words.filter(w => !mastered(w)) : words;
 }
+const mastered = w => { const p = S.prog[keyOf(w)]; return !!p && p.box >= MASTERED_BOX; };
 function buildQueue(keepIdx) {
   if (S.unit !== 'all' && S.unit !== 'wrong' && S.unit !== 'due' && !BOOKS[S.book].units[S.unit]) S.unit = 0;
   combo = 0;
@@ -657,7 +681,7 @@ function renderHeader() {
   $('#selBook').innerHTML = Object.values(BOOKS).map(b => `<option value="${b.id}" ${b.id === S.book ? 'selected' : ''}>${b.name}</option>`).join('');
   const units = BOOKS[S.book].units;
   const total = units.reduce((n, u) => n + u.words.length, 0);
-  const wrongN = Object.keys(S.wrong).length;
+  const wrongN = wrongCount();
   const dueN = dueList().length;
   $('#selUnit').innerHTML = (dueN || S.unit === 'due' ? `<option value="due" ${S.unit === 'due' ? 'selected' : ''}>⏰ 今日复习（${dueN}）</option>` : '')
     + units.map((u, i) => `<option value="${i}" ${S.unit === i ? 'selected' : ''}>${esc(u.name)}（${unitBadge(u)}）</option>`).join('')
@@ -670,7 +694,8 @@ function renderFooter() {
   $('#unitLabel').textContent = name || '';
   $('#count').textContent = queue.length ? `${Math.min(S.idx + 1, queue.length)} / ${queue.length}` : '0 / 0';
   $('#keys').textContent = isTouch ? '' : (S.mode === 'learn'
-    ? '空格 发音 · R 逐节读 · Enter 下一个'
+    ? '空格 发音 · Enter 下一个'
+    : S.mode === 'follow' ? '空格 重听 · Esc 看答案 · Enter 下一个'
     : '空格 重听 · Tab 提示 · Esc 看答案 · Enter 下一个');
 }
 function renderEmpty() {
@@ -679,15 +704,49 @@ function renderEmpty() {
     : S.unit === 'due'
     ? `<div class="sum"><h2>今天的复习都完成啦 🎉</h2><p>拼对的词会隔几天再出现，明天见。</p>
         <div class="sumbtns"><button class="pill pri" id="bNew">去学新词</button><button class="pill" id="bStat2">看看进度</button></div></div>`
+    : S.skipMastered
+    ? `<div class="sum"><h2>这一组都掌握了 👍</h2><p>设置里开着「跳过已掌握的词」，所以这一组没有要练的。</p>
+        <div class="sumbtns"><button class="pill pri" id="bAllAgain">这一组全部再练一遍</button><button class="pill" id="bStat2">看看进度</button></div></div>`
     : `<div class="sum"><h2>这一组没有单词</h2></div>`;
+  if ($('#bAllAgain')) $('#bAllAgain').onclick = () => { S.skipMastered = false; save(); buildQueue(false); enterWord(); };
   if ($('#bNew')) $('#bNew').onclick = startNew;
   if ($('#bStat2')) $('#bStat2').onclick = showStats;
 }
 
-// 例句里把当前单词（含 -s、-ed 等变形）标黄
+// 常见不规则变形：例句里出现的是过去式、过去分词、复数时也能标出来（和小程序 utils/core.js 同一份）
+const IRREGULAR = {
+  be: 'am is are was were been being', have: 'has had having', do: 'does did done doing', go: 'goes went gone going',
+  make: 'made', take: 'took taken', get: 'got gotten', come: 'came', see: 'saw seen', eat: 'ate eaten', give: 'gave given',
+  write: 'wrote written', buy: 'bought', think: 'thought', bring: 'brought', catch: 'caught', teach: 'taught',
+  swim: 'swam swum', sing: 'sang sung', drink: 'drank drunk', begin: 'began begun', fly: 'flew flown flies', grow: 'grew grown',
+  know: 'knew known', throw: 'threw thrown', draw: 'drew drawn', wear: 'wore worn', speak: 'spoke spoken', sleep: 'slept',
+  feel: 'felt', leave: 'left', meet: 'met', keep: 'kept', sit: 'sat', stand: 'stood', tell: 'told', sell: 'sold', find: 'found',
+  hear: 'heard', say: 'said says', pay: 'paid', lose: 'lost', win: 'won', hold: 'held', ride: 'rode ridden', drive: 'drove driven',
+  rise: 'rose risen', fall: 'fell fallen', hide: 'hid hidden', choose: 'chose chosen', break: 'broke broken', forget: 'forgot forgotten',
+  wake: 'woke woken', steal: 'stole stolen', shake: 'shook shaken', mean: 'meant', send: 'sent', spend: 'spent', build: 'built',
+  lend: 'lent', run: 'ran', light: 'lit', feed: 'fed', lead: 'led', fight: 'fought', seek: 'sought', bite: 'bit bitten',
+  blow: 'blew blown', dig: 'dug', hang: 'hung', shoot: 'shot', sweep: 'swept', tear: 'tore torn', understand: 'understood',
+  child: 'children', man: 'men', woman: 'women', foot: 'feet', tooth: 'teeth', mouse: 'mice', person: 'people',
+  good: 'better best', bad: 'worse worst', many: 'more most', much: 'more most', little: 'less least',
+};
+const PLACE = /^(somebody|someone|something|sb|sth)('s)?$|^one's$|^oneself$/i;
+const SUFFIX = '(?:s|es|ed|d|ing|er|ers|est|ly|ies|ied|ier|iest|ily|ness|ment)?';
+const reEsc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// 一个词能匹配的写法：原词 + 规则变形（去 e、双写辅音、y 变 i）+ 不规则变形
+function wordPat(w, inPhrase) {
+  if (inPhrase && PLACE.test(w)) return "[A-Za-z]+(?:'s)?";   // 短语里的 somebody、one's 等占位词
+  if (w.includes('-')) return w.split('-').filter(Boolean).map(x => wordPat(x)).join('[-\\s]');   // up-to-date 也认 up to date
+  const low = w.toLowerCase(), alts = [reEsc(w) + SUFFIX];
+  if (/[a-z]e$/i.test(w)) alts.push(reEsc(w.slice(0, -1)) + '(?:ing|ed|er|ers|est)');          // make -> making
+  if (/[^aeiou]y$/i.test(w)) alts.push(reEsc(w.slice(0, -1)) + '(?:ies|ied|ier|iest|ily)');    // study -> studies
+  if (/[^aeiou][aeiou][bdglmnprt]$/i.test(w) && w.length <= 6) alts.push(reEsc(w) + w.slice(-1) + '(?:ing|ed|er|ers|est)'); // run -> running
+  if (IRREGULAR[low]) alts.push(...IRREGULAR[low].split(' '));
+  return '(?:' + alts.join('|') + ')';
+}
+// 例句里把当前单词（含变形；短语每个词都可以变形）标黄
 function highlight(en, word) {
-  const w = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
-  const m = en.match(new RegExp('(^|[^A-Za-z])(' + w + '[a-z]*)', 'i'));
+  const parts = word.trim().split(/\s+/);
+  const m = en.match(new RegExp('(^|[^A-Za-z])(' + parts.map(p => wordPat(p, parts.length > 1)).join('\\s+') + ')(?![A-Za-z])', 'i'));
   if (!m) return esc(en);
   const i = m.index + m[1].length;
   return esc(en.slice(0, i)) + '<mark>' + esc(m[2]) + '</mark>' + esc(en.slice(i + m[2].length));
@@ -707,7 +766,7 @@ function renderLearn() {
   const hasSilent = W.syls.some(s => s.chunks.some(c => c.p === '-'));
   const row = sylGroups().map(g => '<div class="wgroup">' + g.map((s, j) =>
     (j ? '<span class="sep"><span class="st">/</span></span>' : '')
-    + `<span class="syl" data-i="${s.si}" style="--c:${color(s.si)}"><span class="chunks">`
+    + `<span class="syl ${SYL_AUDIO ? 'tap' : ''}" data-i="${s.si}" style="--c:${color(s.si)}"><span class="chunks">`
     + s.chunks.map(c => `<span class="ck ${c.p === '-' ? 'silent' : ''}"><span class="cl">${esc(c.l)}</span><span class="cp">${c.p === '-' ? '' : esc(c.p)}</span></span>`).join('')
     + '</span><span class="sl"></span></span>'
   ).join('') + '</div>').join('');
@@ -716,17 +775,17 @@ function renderLearn() {
     <div class="ctrls">
       <span class="ipa">${esc(W.ipa)}</span>
       <button class="round" id="bPlay" title="发音（空格）">▶</button>
-      <button class="pill" id="bRead" title="一节一节读（R）">逐节读</button>
+      ${SYL_AUDIO ? '<button class="pill" id="bRead" title="一节一节读（R）">逐节读</button>' : ''}
     </div>
     <div class="cn">${esc(W.item.cn)}</div>
     ${S.showSent ? sentencesHtml(3) : ''}
-    <div class="sub">字母下面是它的读音${hasSilent ? '，淡色字母不发音' : ''} · 点某一节可以单独听 · <a href="#" id="bEdit">拆得不对？改一下</a></div>`;
+    <div class="sub">字母下面是它的读音${hasSilent ? '，淡色字母不发音' : ''}${SYL_AUDIO ? ' · 点某一节可以单独听' : ''} · <a href="#" id="bEdit">拆得不对？改一下</a></div>`;
   $('#bPlay').onclick = playWord;
-  $('#bRead').onclick = readBySyllable;
+  if (SYL_AUDIO) $('#bRead').onclick = readBySyllable;
   $('#bEdit').onclick = e => { e.preventDefault(); editSplit(W.item); };
   bindSentences();
   fitRow();
-  main.querySelectorAll('.syl').forEach(el => el.onclick = () => {
+  if (SYL_AUDIO) main.querySelectorAll('.syl').forEach(el => el.onclick = () => {
     const i = +el.dataset.i;
     stopAudio();
     el.classList.add('speak');
@@ -767,7 +826,7 @@ function renderTyping(shake) {
           else if (r === W.pop) cls += ' pop';          // 刚拼对的那个字母弹一下
         }
       } else {
-        cls = (S.mode === 'follow' || W.hint === s.si) ? 'ghost' : 'hidden';
+        cls = (S.mode === 'follow' || W.retype || W.hint === s.si) ? 'ghost' : 'hidden';
         if (W.wrongFlash && W.wrongFlash.r === r) { cls = 'wrong'; shown = W.wrongFlash.key; }
         if (r === W.pos) cls += ' cur';
       }
@@ -779,9 +838,13 @@ function renderTyping(shake) {
       + `<span class="slot ${s.si === activeSi ? 'active' : ''} ${full ? 'full' : ''}" style="--c:${color(s.si)}"><span class="chars">${chars}</span><span class="ul"></span></span>`;
   }).join('') + '</div>').join('');
   let status = '<div class="status"></div>';
-  if (W.done) status = W.ok ? `<div class="status ok">✓ 全对，真棒！${combo >= 2 ? ' 🔥连对 ' + combo + ' 个' : ''}</div>`
-    : '<div class="status bad">没关系，记到错词本了，下次再练 · 按 Enter 继续</div>';
+  if (W.done && W.retyped) status = '<div class="status ok">✓ 这次拼对了，记住它</div>';
+  else if (W.done) status = W.ok ? `<div class="status ok">✓ 全对，真棒！${combo >= 2 ? ' 🔥连对 ' + combo + ' 个' : ''}</div>`
+    : `<div class="status bad">没关系，记到错词本了${S.retype ? '，等一下照着再拼一遍' : '，下次再练 · 按 Enter 继续'}</div>`;
+  else if (W.retype) status = `<div class="status">照着正确拼写再拼一遍${isTouch ? '' : ' · Enter 跳过'}</div>`;
   else if (W.hint >= 0) status = '<div class="status">提示：照着淡色字母拼</div>';
+  // 跟写时字母都看得见，「提示」没用；再拼一遍时也不用提示、看答案，但可以跳过
+  const showHint = !W.done && !W.retype && S.mode === 'dictation', showReveal = !W.done && !W.retype;
   const showIpa = S.mode === 'follow' || W.done; // 听写时音标会提示拼写，拼完再显示
   main.innerHTML = `
     <div class="wordrow ${W.done && W.ok ? 'win' : ''}" id="wrow" style="${fontFor(W.text, true)}">${row}</div>
@@ -792,17 +855,18 @@ function renderTyping(shake) {
       `<button class="tile" data-t="${i}" ${W.used.has(i) ? 'disabled' : ''}>${esc(t.ch)}</button>`).join('') + '</div>' : ''}
     <div class="ctrls">
       <button class="pill" id="bPlay">🔊 重听</button>
-      <button class="pill" id="bHint">💡 提示</button>
-      <button class="pill" id="bShow">👀 看答案</button>
+      ${showHint ? '<button class="pill" id="bHint">💡 提示</button>' : ''}
+      ${showReveal ? '<button class="pill" id="bShow">👀 看答案</button>' : ''}
+      ${W.retype && !W.done ? '<button class="pill" id="bGo">跳过 →</button>' : ''}
       ${W.done ? '<button class="pill pri" id="bGo">下一个 →</button>' : ''}
     </div>
     ${S.showSent && (S.mode === 'follow' || W.done) ? sentencesHtml(1) : ''}
     ${isTouch && !W.done ? `<div class="tapkb">${S.tiles ? '想用键盘打字，点这里' : '点这里打开键盘'}</div>` : ''}`;
   main.querySelectorAll('.tile').forEach(b => b.onclick = () => { onLetter(W.tiles[+b.dataset.t].ch, +b.dataset.t); focusKb(); });
   $('#bPlay').onclick = () => { playWord(); focusKb(); };
-  $('#bHint').onclick = () => { hint(); focusKb(); };
-  $('#bShow').onclick = () => { reveal(); focusKb(); };
-  if (W.done) $('#bGo').onclick = next;
+  if (showHint) $('#bHint').onclick = () => { hint(); focusKb(); };
+  if (showReveal) $('#bShow').onclick = () => { reveal(); focusKb(); };
+  if ($('#bGo')) $('#bGo').onclick = next;
   bindSentences();
   fitRow();
   if (shake) { const el = main.querySelector('.slot.active'); el && el.classList.add('shake'); }
@@ -937,13 +1001,17 @@ function onLetter(k, tileIdx) {
     if (!nextReq) { complete(); return; }
     if (nextReq.si !== need.si) {
       sfxSyl();                                                                           // 拼完一节：叮咚
-      if (S.sylSpeak) ttsP(spokenSyl(W.syls[need.si].t), 0.8);                            // 并读出这一节
+      if (SYL_AUDIO && S.sylSpeak) ttsP(spokenSyl(W.syls[need.si].t), 0.8);               // 并读出这一节
     } else sfxTick(W.pos - 1);                                                            // 每拼对一个字母：音阶往上走一格
     renderTyping();
   } else {
-    W.err++; W.hadError = true;
+    W.err++;
+    // 跟写时字母就在眼前，按错基本是手滑：抖一下、响一声，不算拼错。再拼一遍时也不算。听写照样算错
+    if (S.mode === 'dictation' && !W.retype) {
+      W.hadError = true;
+      if (W.err >= 2) W.hint = need.si;
+    }
     W.wrongFlash = {r: W.pos, key: k};
-    if (W.err >= 2) W.hint = need.si;
     sfxWrong();
     renderTyping(true);
     const tok = W.token;
@@ -951,16 +1019,32 @@ function onLetter(k, tileIdx) {
     onLetter.t = setTimeout(() => { if (W && W.token === tok && W.wrongFlash) { W.wrongFlash = null; renderTyping(); } }, 400);
   }
 }
+// 再拼一遍：把这个词清空，淡色字母照着拼。结果已经在第一次记过了，这次不再记
+function startRetype() {
+  W.retype = true; W.done = false; W.pos = 0; W.err = 0; W.hint = -1; W.wrongFlash = null; W.pop = -1;
+  W.used = new Set();
+  resetKb();
+  renderTyping();
+  focusKb();
+}
+function finishRetype() {
+  W.done = true; W.retyped = true; W.wrongFlash = null;
+  sfxSyl();
+  renderTyping();
+  const tok = W.token, alive = () => W && W.token === tok;
+  Promise.race([playWord(), sleep(3500)]).then(() => sleep(300)).then(() => { if (alive()) next(); });
+}
 function complete() {
+  if (W.retype) { finishRetype(); return; }
   W.done = true;
   W.ok = !W.hadError;
   W.wrongFlash = null;
   setResult(W.item, W.ok);
   const key = keyOf(W.item);
   if (!W.ok) {
-    const e = S.wrong[key] || {item: W.item, count: 0};
-    e.item = W.item;
-    e.count++;
+    const e = S.wrong[key] || {count: 0};
+    if (ALLW[key]) delete e.item;                               // 词库里有就不存词条
+    e.count = (e.count || 0) + 1;
     S.wrong[key] = e;
   } else if (S.unit === 'wrong') {
     delete S.wrong[key];
@@ -974,8 +1058,11 @@ function complete() {
   if (W.ok) {
     afterRight(tok, celebrateWord(), rec);
   } else {
-    sfxOops();                                                  // 拼错的不扣分，轻轻提示一下，停下来等 Enter
-    setTimeout(() => { if (W && W.token === tok) playWord(); }, 400);
+    sfxOops();                                                  // 拼错的不扣分，轻轻提示一下
+    const alive = () => W && W.token === tok;
+    // 先把正确答案读一遍；开着「拼错后再拼一遍」就接着让他照着拼，不然停下来等 Enter
+    sleep(400).then(() => alive() && Promise.race([playWord(), sleep(3500)]))
+      .then(() => sleep(400)).then(() => { if (alive() && S.retype && W.done && !W.retyped) startRetype(); });
   }
 }
 // 拼对之后：夸一句（和弹字同步）→ 再读一遍单词 → 自动下一个。中途按 Enter/→ 随时跳过
@@ -993,13 +1080,13 @@ async function afterRight(tok, praise, rec) {
 }
 function goalFx() { rain(150); sfxFanfare(); toast('🎯 今日目标完成！'); }
 function hint() {
-  if (!W || W.done || S.mode === 'learn') return;
+  if (!W || W.done || W.retype || S.mode !== 'dictation') return;  // 跟写时字母本来就看得见
   W.hint = W.req[W.pos].si;
   W.hadError = true;
   renderTyping();
 }
 function reveal() {
-  if (!W || W.done || S.mode === 'learn') return;
+  if (!W || W.done || W.retype || S.mode === 'learn') return;
   W.hadError = true;
   W.pos = W.req.length;
   complete();
@@ -1109,7 +1196,7 @@ function showStats() {
     <p class="sub" style="text-align:left">「掌握」= 隔了 7 天以上，听写还能一次拼对。词的总数里，重复出现的词只算一次。</p>
     <div class="sumbtns">
       <button class="pill pri" id="bsReview" ${st.due ? '' : 'disabled'}>开始复习（${st.due}）</button>
-      <button class="pill" id="bsWrong" ${Object.keys(S.wrong).length ? '' : 'disabled'}>练错词（${Object.keys(S.wrong).length}）</button>
+      <button class="pill" id="bsWrong" ${wrongCount() ? '' : 'disabled'}>练错词（${wrongCount()}）</button>
       <button class="pill" id="bsNew">学新词</button>
     </div>`);
   $('#bsReview').onclick = startReview;
@@ -1129,20 +1216,22 @@ function showSettings() {
       <label style="display:inline-flex;gap:4px"><input type="radio" name="acc" value="us" ${S.accent === 'us' ? 'checked' : ''}>美式</label></span></div>
     ${chk('autoPlay', '切换单词时自动发音（听写模式总是自动发音）')}
     ${chk('tiles', '跟写、听写时显示字母块（点字母拼，不用找键盘；会混进几个易混字母）')}
-    ${chk('sylSpeak', '跟写、听写时，拼完一节读一节')}
+    ${SYL_AUDIO ? chk('sylSpeak', '跟写、听写时，拼完一节读一节') : ''}
+    ${chk('retype', '拼错后再拼一遍（听写拼错或看了答案，照着正确拼写再拼一遍才进下一个）')}
+    ${chk('skipMastered', '跳过已掌握的词（练单元时不出隔 7 天以上还拼得对的词；复习、错词本不受影响）')}
     ${chk('showSent', '显示例句')}
     ${chk('sound', '音效（拼字的叮咚声、对错提示音）')}
     ${chk('praise', '拼对后读出夸奖的话（Good! Great! 等）')}
     ${chk('fx', '庆祝动画（彩带、弹出的夸奖字）')}
     ${chk('shuffle', '打乱顺序')}
     <div class="row"><span>每日目标</span><select id="selGoal">${[5, 10, 15, 20, 30, 50].map(n => `<option value="${n}" ${S.goal === n ? 'selected' : ''}>${n} 个词</option>`).join('')}</select></div>
-    <div class="row"><span>错词本 ${Object.keys(S.wrong).length} 个</span><button class="pill" id="bClrWrong">清空错词本</button></div>
+    <div class="row"><span>错词本 ${wrongCount()} 个</span><button class="pill" id="bClrWrong">清空错词本</button></div>
     <div class="row"><span>改过的拆分 ${Object.keys(S.custom).length} 个</span><button class="pill" id="bClrSplit">全部恢复默认</button></div>
     <div class="row"><span>学习记录（复习进度、打卡）</span><button class="pill" id="bClrProg">清空学习记录</button></div>
     <p class="sub">记录保存在这台电脑的浏览器里。发音优先用有道词典真人发音（要联网），没网时用浏览器自带朗读。音标是英式的，切到美式发音音标不变。</p>`);
   $('#box').querySelectorAll('[data-k]').forEach(c => c.onchange = () => {
     S[c.dataset.k] = c.checked; save();
-    if (c.dataset.k === 'shuffle') { buildQueue(false); enterWord(); }
+    if (c.dataset.k === 'shuffle' || c.dataset.k === 'skipMastered') { buildQueue(false); enterWord(); }
     else if (c.dataset.k === 'showSent' || c.dataset.k === 'tiles') render();
   });
   $('#box').querySelectorAll('[name=acc]').forEach(r => r.onchange = () => { S.accent = r.value; save(); });
@@ -1192,13 +1281,13 @@ document.addEventListener('keydown', e => {
   if (S.mode === 'learn') {
     if (k === ' ') { e.preventDefault(); playWord(); }
     else if (k === 'Enter') { e.preventDefault(); next(); }
-    else if (k === 'r' || k === 'R') { e.preventDefault(); readBySyllable(); }
+    else if (SYL_AUDIO && (k === 'r' || k === 'R')) { e.preventDefault(); readBySyllable(); }
     return;
   }
   if (k === ' ') { e.preventDefault(); playWord(); return; }
   if (k === 'Tab') { e.preventDefault(); hint(); return; }
   if (k === 'Escape') { e.preventDefault(); reveal(); return; }
-  if (k === 'Enter') { e.preventDefault(); if (W.done) next(); return; }
+  if (k === 'Enter') { e.preventDefault(); if (W.done || W.retype) next(); return; }
   if (/^[a-zA-Z]$/.test(k)) { e.preventDefault(); onLetter(k); }
 });
 
